@@ -5,7 +5,7 @@ import collections
 import matplotlib.pyplot as plt
 from calibration_utils import calibrate_camera, undistort
 from binarization_utils import binarize
-from perspective_utils import birdeye
+from perspective_utils import Warp
 from globals import ym_per_pix, xm_per_pix
 
 
@@ -32,6 +32,9 @@ class Line:
         self.all_x = None
         self.all_y = None
 
+        self.hist_last_pos = 0
+        self.hist_min_value = 10000
+
     def update_line(self, new_fit_pixel, new_fit_meter, detected, clear_buffer=False):
         """
         Update Line with new fitted coefficients.
@@ -54,7 +57,7 @@ class Line:
         self.recent_fits_pixel.append(self.last_fit_pixel)
         self.recent_fits_meter.append(self.last_fit_meter)
 
-    def draw(self, mask, color=(255, 0, 0), line_width=50, average=False):
+    def draw(self, mask, color=(255, 0, 0), line_width=20, average=False):
         """
         Draw the line on a color mask image.
         """
@@ -110,16 +113,44 @@ def get_fits_by_sliding_windows(birdeye_binary, line_lt, line_rt, n_windows=9, v
 
     # Assuming you have created a warped binary image called "binary_warped"
     # Take a histogram of the bottom half of the image
-    histogram = np.sum(birdeye_binary[height//2:-30, :], axis=0)
+    histogram = np.sum(birdeye_binary[height // 2:, :], axis=0)
 
-    # Create an output image to draw on and  visualize the result
+    # Create an output image to draw on and visualize the result
     out_img = np.dstack((birdeye_binary, birdeye_binary, birdeye_binary)) * 255
 
     # Find the peak of the left and right halves of the histogram
     # These will be the starting point for the left and right lines
-    midpoint = len(histogram) // 2
-    leftx_base = np.argmax(histogram[:midpoint])
-    rightx_base = np.argmax(histogram[midpoint:]) + midpoint
+    length = len(histogram)
+    midpoint = length // 2
+    roi_point = int(midpoint * 0.8)
+
+    # # weighting array for focusing more on a region of interest to detect lines
+    # roi_weights = np.ones(midpoint)
+    # roi_weights[midpoint // 4:midpoint // 2] = roi_weights[midpoint // 4:midpoint // 2] * 2
+
+    # histogram[:midpoint] = histogram[:midpoint] * roi_weights
+    # histogram[midpoint:] = histogram[midpoint:] * np.flip(roi_weights, 0)
+
+    # # orginal algorithm
+    # # find absolute maximum
+    # leftx_base = np.argmax(histogram[:midpoint])
+    # rightx_base = np.argmax(histogram[midpoint:]) + midpoint
+    # if line_lt.hist_min_value > histogram[leftx_base]:
+    #     line_lt.hist_min_value = histogram[leftx_base]
+    # if line_rt.hist_min_value > histogram[rightx_base]:
+    #     line_rt.hist_min_value = histogram[rightx_base]
+    # print("hist_min_left {}".format(line_lt.hist_min_value))
+    # print("hist_min_right {}".format(line_rt.hist_min_value))
+
+    # new algorithm
+    # find first greater than threshold
+    hist_min = 30
+    leftx_base = roi_point - np.argmax(np.flip(histogram[:roi_point], 0) >= hist_min)
+    rightx_base = np.argmax(histogram[length - roi_point:] >= hist_min) + length - roi_point
+    line_lt.hist_last_pos = leftx_base
+    line_rt.hist_last_pos = rightx_base
+    print("leftx_base {}".format(leftx_base))
+    print("rightx_base {}".format(rightx_base))
 
     # Set height of windows
     window_height = np.int(height / n_windows)
@@ -207,7 +238,7 @@ def get_fits_by_sliding_windows(birdeye_binary, line_lt, line_rt, n_windows=9, v
     out_img[nonzero_y[right_lane_inds], nonzero_x[right_lane_inds]] = [0, 0, 255]
 
     if verbose:
-        f, ax = plt.subplots(1, 2)
+        f, ax = plt.subplots(1, 3)
         f.set_facecolor('white')
         ax[0].imshow(birdeye_binary, cmap='gray')
         ax[1].imshow(out_img)
@@ -215,10 +246,11 @@ def get_fits_by_sliding_windows(birdeye_binary, line_lt, line_rt, n_windows=9, v
         ax[1].plot(right_fitx, ploty, color='yellow')
         ax[1].set_xlim(0, 1280)
         ax[1].set_ylim(720, 0)
+        ax[2].plot(histogram)
 
         plt.show()
 
-    return line_lt, line_rt, out_img
+    return line_lt, line_rt, out_img, histogram
 
 
 def get_fits_by_previous_fits(birdeye_binary, line_lt, line_rt, verbose=False):
@@ -312,11 +344,11 @@ def get_fits_by_previous_fits(birdeye_binary, line_lt, line_rt, verbose=False):
     return line_lt, line_rt, img_fit
 
 
-def draw_back_onto_the_road(img_undistorted, Minv, line_lt, line_rt, keep_state):
+def draw_back_onto_the_road(img_undistorted, warp, line_lt, line_rt, keep_state):
     """
     Draw both the drivable lane area and the detected lane-lines onto the original (undistorted) frame.
     :param img_undistorted: original undistorted color frame
-    :param Minv: (inverse) perspective transform matrix used to re-project on original frame
+    :param warp: warp object to do perspective transformation and re-project on original frame
     :param line_lt: left lane-line previously detected
     :param line_rt: right lane-line previously detected
     :param keep_state: if True, line state is maintained
@@ -337,24 +369,31 @@ def draw_back_onto_the_road(img_undistorted, Minv, line_lt, line_rt, keep_state)
     pts_left = np.array([np.transpose(np.vstack([left_fitx, ploty]))])
     pts_right = np.array([np.flipud(np.transpose(np.vstack([right_fitx, ploty])))])
     pts = np.hstack((pts_left, pts_right))
-    cv2.fillPoly(road_warp, np.int_([pts]), (0, 255, 0))
-    road_dewarped = cv2.warpPerspective(road_warp, Minv, (width, height))  # Warp back to original image space
+    cv2.fillPoly(road_warp, np.int_([pts]), (100, 255, 100))
 
-    blend_onto_road = cv2.addWeighted(img_undistorted, 1., road_dewarped, 0.3, 0)
+    # now draw solid lines to highlight them
+    road_warp = line_lt.draw(road_warp, color=(255, 0, 0), average=keep_state)
+    road_warp = line_rt.draw(road_warp, color=(0, 0, 255), average=keep_state)
 
-    # now separately draw solid lines to highlight them
-    line_warp = np.zeros_like(img_undistorted)
-    line_warp = line_lt.draw(line_warp, color=(255, 0, 0), average=keep_state)
-    line_warp = line_rt.draw(line_warp, color=(0, 0, 255), average=keep_state)
-    line_dewarped = cv2.warpPerspective(line_warp, Minv, (width, height))
+    # draw solid averaged center line
+    center_fit = np.mean(np.array([left_fit, right_fit]), axis=0)
+    h, w, c = road_warp.shape
+    plot_y = np.linspace(0, h - 1, h)
+    line_center = center_fit[0] * plot_y ** 2 + center_fit[1] * plot_y + center_fit[2]
+    line_left_side = line_center - 20 // 2
+    line_right_side = line_center + 20 // 2
+    # Some magic here to recast the x and y points into usable format for cv2.fillPoly()
+    pts_left = np.array(list(zip(line_left_side, plot_y)))
+    pts_right = np.array(np.flipud(list(zip(line_right_side, plot_y))))
+    pts = np.vstack([pts_left, pts_right])
+    # Draw the lane onto the warped blank image
+    cv2.fillPoly(road_warp, [np.int32(pts)], (255, 0, 255))
 
-    lines_mask = blend_onto_road.copy()
-    idx = np.any([line_dewarped != 0][0], axis=2)
-    lines_mask[idx] = line_dewarped[idx]
+    road_dewarped = warp.perspective(road_warp, birdeye=False)  # Warp back to original image space
 
-    blend_onto_road = cv2.addWeighted(src1=lines_mask, alpha=0.8, src2=blend_onto_road, beta=0.5, gamma=0.)
+    blend_onto_road = cv2.addWeighted(img_undistorted, 1., road_dewarped, 0.4, 0)
 
-    return blend_onto_road
+    return blend_onto_road, road_warp
 
 
 if __name__ == '__main__':
@@ -372,14 +411,7 @@ if __name__ == '__main__':
 
         img_binary = binarize(img_undistorted, verbose=False)
 
-        img_birdeye, M, Minv = birdeye(img_binary, verbose=False)
+        warp = Warp()
+        img_birdeye = warp.perspective(img_binary, verbose=False)
 
-        line_lt, line_rt, img_out = get_fits_by_sliding_windows(img_birdeye, line_lt, line_rt, n_windows=7, verbose=True)
-
-
-
-
-
-
-
-
+        line_lt, line_rt, img_out, histogram_img = get_fits_by_sliding_windows(img_birdeye, line_lt, line_rt, n_windows=9, verbose=True)

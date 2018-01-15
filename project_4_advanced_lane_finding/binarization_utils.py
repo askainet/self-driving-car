@@ -6,7 +6,29 @@ import matplotlib.pyplot as plt
 
 # selected threshold to highlight yellow lines
 yellow_HSV_th_min = np.array([0, 70, 70])
-yellow_HSV_th_max = np.array([50, 255, 255])
+yellow_HSV_th_max = np.array([150, 255, 255])
+
+
+def region_of_interest(frame, roi):
+    """
+    Filter out not-so-important region in the image
+    :param frame: source image
+    :param roi: list of points to create a polygon
+    :return: ROI from source image
+    """
+    mask = np.zeros_like(frame)
+
+    # defining a 3 channel or 1 channel color to fill the mask with depending on the input image
+    if len(frame.shape) > 2:
+        channel_count = frame.shape[2]  # i.e. 3 or 4 depending on your image
+        ignore_mask_color = (255,) * channel_count
+    else:
+        ignore_mask_color = 255
+
+    cv2.fillPoly(mask, [roi], ignore_mask_color)
+
+    masked_edges = cv2.bitwise_and(frame, mask)
+    return masked_edges
 
 
 def thresh_frame_in_HSV(frame, min_values, max_values, verbose=False):
@@ -69,6 +91,15 @@ def binarize(img, verbose=False):
 
     binary = np.zeros(shape=(h, w), dtype=np.uint8)
 
+    roi = np.array([
+        [w, h - 40],    # br
+        [0, h - 40],    # bl
+        [300, 460],     # tl
+        [w - 300, 460]  # tr
+    ])
+
+    # img = region_of_interest(img, roi)
+
     # highlight yellow lines by threshold in HSV color space
     HSV_yellow_mask = thresh_frame_in_HSV(img, yellow_HSV_th_min, yellow_HSV_th_max, verbose=False)
     binary = np.logical_or(binary, HSV_yellow_mask)
@@ -78,8 +109,8 @@ def binarize(img, verbose=False):
     binary = np.logical_or(binary, eq_white_mask)
 
     # get Sobel binary mask (thresholded gradients)
-    sobel_mask = thresh_frame_sobel(img, kernel_size=9)
-    binary = np.logical_or(binary, sobel_mask)
+    # sobel_mask = thresh_frame_sobel(img, kernel_size=9)
+    # binary = np.logical_or(binary, sobel_mask)
 
     # apply a light morphology to "fill the gaps" in the binary image
     kernel = np.ones((5, 5), np.uint8)
@@ -88,10 +119,12 @@ def binarize(img, verbose=False):
     if verbose:
         f, ax = plt.subplots(2, 3)
         f.set_facecolor('white')
+
         ax[0, 0].imshow(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
         ax[0, 0].set_title('input_frame')
         ax[0, 0].set_axis_off()
         ax[0, 0].set_axis_bgcolor('red')
+
         ax[0, 1].imshow(eq_white_mask, cmap='gray')
         ax[0, 1].set_title('white mask')
         ax[0, 1].set_axis_off()
@@ -100,9 +133,9 @@ def binarize(img, verbose=False):
         ax[0, 2].set_title('yellow mask')
         ax[0, 2].set_axis_off()
 
-        ax[1, 0].imshow(sobel_mask, cmap='gray')
-        ax[1, 0].set_title('sobel mask')
-        ax[1, 0].set_axis_off()
+        # ax[1, 0].imshow(sobel_mask, cmap='gray')
+        # ax[1, 0].set_title('sobel mask')
+        # ax[1, 0].set_axis_off()
 
         ax[1, 1].imshow(binary, cmap='gray')
         ax[1, 1].set_title('before closure')
@@ -111,6 +144,7 @@ def binarize(img, verbose=False):
         ax[1, 2].imshow(closing, cmap='gray')
         ax[1, 2].set_title('after closure')
         ax[1, 2].set_axis_off()
+
         plt.show()
 
     return closing
